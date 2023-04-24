@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import cptac
+import cptac as cptac
 import biograder
 #The copy number variation homework is #4
 biograder.download("bio462_hw4")
@@ -35,16 +34,25 @@ brca_cnv_chr = brca_cnv_chr.sort_values(by=['start_bp'])
 
 # re-organize (transpose BRCA data)
 brca_cnv_chr.drop(brca_cnv_chr.columns[[0,1,2]], axis=1, inplace=True)
-brca_cnv_chr_t = brca_cnv_chr.transpose()
+#brca_cnv_chr_t = brca_cnv_chr.transpose()
 
 # print out first few rows of current BRCA CNV table
-print(brca_cnv_chr_t.head(3))
+print(brca_cnv_chr.head(3))
+
+brca_mini_df = brca_cnv_chr.head(20)
+
+print(brca_mini_df.iloc[1,:])
 
 # next steps
 # Use HMM models to figure out how to predict the BRCA stuff
 # Can do this with other cancer types too?
 # Each state has its own emission values (effect) on CNV fold change...
 # we will use the CNV values to generate estimates of the HMM parameters and states?
+
+# initialie parameters
+# array for cancer subtypes (the hidden states), initial probabilities, m cancer subtypes
+# transition matrix: m x m
+# emission matrix: what are the emissions here...
 
 # initialize parameters
 # v_init = 0.5
