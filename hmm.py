@@ -1,4 +1,4 @@
-import os
+import os, copy
 import numpy as np
 from scipy.special import logsumexp
 
@@ -6,7 +6,7 @@ from scipy.special import logsumexp
 # initialize emission probabilties matrix
 def ViterbiTraining(
     sequences: list[str],
-    emission_vals: list[str],
+    # emission_vals: list[str],
     state_vals: list[str],
     transition_mm: dict[str, dict[str, float]],
     emission_mm: dict[str, dict[str, float]],
@@ -30,15 +30,15 @@ def ViterbiTraining(
     while current_path != new_paths:
         current_path = new_paths
         for i, seq in enumerate(sequences):
-            state_path = ViterbiDecoding(seq, emission_vals, state_vals, transition_mm, emission_mm, init_mm)
+            state_path = ViterbiDecoding(seq, state_vals, transition_mm, emission_mm, init_mm)
             new_paths[i] = state_path
-        emission_mm = UpdateEmission(sequences, new_paths, state_vals, emission_vals)
+        emission_mm = UpdateEmission(sequences, new_paths, state_vals, emission_mm)
         transition_mm = UpdateTransition(new_paths, state_vals)
 
     return current_path, transition_mm, emission_mm
 
 
-def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: list[str]):
+def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: list[str], old_emissions):
     """
     Creates an emission matrix based on a sequence of emitted characters and a sequence of states.
     Input:
@@ -48,37 +48,31 @@ def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: lis
     Output:
         The updated emission probabiltiies.
     """
-
-
-def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: list[str], emission_vals: list[str]):
-    """
-    Creates an emission matrix based on a sequence of emitted characters and a sequence of states.
-    Input:
-        seq: the sequence of emitted characters
-        state_path: the sequence of states
-        state_vals: the possible states.
-    Output:
-        The updated emission probabiltiies.
-    """
-    emission_count = {}
+    new_emission = copy.deepcopy(old_emissions)
+    state_counts = {}
     for s in state_vals:
-        emission_count[s] = {}
-        for e in emission_vals:
-            emission_count[s][e] = 1
+        state_counts[s] = 1
 
     for seq, path in zip(sequences, state_paths):
         for char, state in zip(seq, path):
-            emission_count[state][char] += 1
-
-    for s in state_vals:
-        total = 0
-        for e in emission_vals:
-            total += emission_count[s][e]
-        for e in emission_vals:
-            emission_count[s][e] /= total
-            emission_count[s][e] = np.log(emission_count[s][e])
-    return emission_count
-
+            new_emission[state][0] += char
+            state_counts[state] += 1
+    
+    for state in state_vals:
+        if state_counts[state] != 0:
+            new_emission[state][0] /= state_counts[state]
+    
+    for seq, path in zip(sequences, state_paths):
+        for char, state in zip(seq, path):
+            if state_counts[state] != 0:
+                new_emission[state][1] += char-new_emission[state][0]
+    
+    for state in state_vals:
+        if state_counts[state] != 0:
+            new_emission[state][1] /= state_counts[state]
+    
+    print(new_emission)
+    return new_emission
 
 def UpdateTransition(state_paths: list[str], state_vals: list[str]):
     """
@@ -114,10 +108,9 @@ def UpdateTransition(state_paths: list[str], state_vals: list[str]):
 
 def ViterbiDecoding(
     seq: str,
-    emission_vals: list[str],
     state_vals: list[str],
     transition_mm: dict[str, dict[str, float]],
-    emission_mm: dict[str, dict[str, float]],
+    emission_mm: dict[str, list[float]],
     init_prob: dict[int, int],
 ) -> str:
     """
@@ -130,11 +123,12 @@ def ViterbiDecoding(
     Output:
         Sequence of states.
     """
-
     score_matrix = np.zeros([len(state_vals), len(seq)])
     path_matrix = np.zeros(score_matrix.shape) - 1  # Initialize a matrix of -1. 0 = vampire, 1 = werewolf
     for row, state in enumerate(state_vals):
-        score_matrix[row, 0] = init_prob[state] + emission_mm[state][seq[0]]
+        mu, sigma = emission_mm[state]
+        log_prob_emit = LogNormal(seq[0], mu, sigma)
+        score_matrix[row, 0] = init_prob[state] + log_prob_emit
 
     for col in range(1, score_matrix.shape[1]):
         for row in range(score_matrix.shape[0]):
@@ -142,8 +136,10 @@ def ViterbiDecoding(
             best_score = -np.inf
             best_prev_state = -1
             for i, old_state in enumerate(state_vals):  # Number of states
+                mu, sigma = emission_mm[new_state]
+                log_prob_emit = LogNormal(seq[col], mu, sigma)
                 score = (
-                    score_matrix[i, col - 1] + transition_mm[old_state][new_state] + emission_mm[new_state][seq[col]]
+                    score_matrix[i, col - 1] + transition_mm[old_state][new_state] + log_prob_emit
                 )
                 if score > best_score:
                     best_score = score
@@ -197,10 +193,12 @@ def LogLikelihood(sequences, state_paths, emissions, transitions, init_probs):
     for sequence, state_path in zip(sequences, state_paths):
         prev_state = None
         for idx, (char, state) in enumerate(zip(sequence, state_path)):
+            mu, sigma = emissions[state]
+            log_prob_emit = LogNormal(char, mu, sigma)
             if idx == 0:
-                log_likelihood += emissions[state][char] + init_probs[state]
+                log_likelihood += log_prob_emit + init_probs[state]
             else:
-                log_likelihood += emissions[state][char] + transitions[prev_state][state]
+                log_likelihood += log_prob_emit + transitions[prev_state][state]
             prev_state = state
     return log_likelihood
 
@@ -238,218 +236,224 @@ def ConvertToAmpLoss(data):
 
 ####
 
-def BaumWelch(seq, transition, emission, weights):
-    states = sorted(list(transition.keys()))
-    loglikelihood = -np.inf
-    num_iter = 0
-    delta = np.inf
-    while np.abs(delta) > 1 and num_iter < 50:
-        num_iter += 1
-        old_loglikelihood = loglikelihood
-        alpha, beta, gamma, epsilon = EStep(seq, transition, emission, weights)
-        transition, emission, weights = MStep(seq, gamma, epsilon, states)
-        loglikelihood = logsumexp(alpha[:, -1])
-        delta = loglikelihood - old_loglikelihood
-        print(delta)
-
-    return loglikelihood
-
 def LogNormal(x: float, mu: float, sigma: float):
-    return -np.log(sigma * np.sqrt(2 * np.pi)) - 0.5 * (np.power((x - mu) / sigma, 2))
+    try:
+        return -np.log(sigma * np.sqrt(2 * np.pi)) - 0.5 * (np.power((x - mu) / sigma, 2))
+    except:
+        print('Sigma is:', sigma)
+        raise Exception("HELP")
 
-def EStep(
-    seq: list[float],
-    transition_matrix: dict[str, dict[str, int]],
-    emission_matrix: dict[str, list[int]],
-    p_state: dict[str, int],
-):
-    """
-    E-Step of Baum-Welch algorithm.
-    """
-    alpha_matrix = Forward(seq, transition_matrix, emission_matrix, p_state)
-    beta_matrix = Backward(seq, transition_matrix, emission_matrix)
-    gamma = CalculateProbabiiltyMatrix(alpha_matrix, beta_matrix)
-    epsilon = CalculateJointProbability(seq, alpha_matrix, beta_matrix, transition_matrix, emission_matrix)
+# def BaumWelch(seq, transition, emission, weights):
+#     states = sorted(list(transition.keys()))
+#     loglikelihood = -np.inf
+#     num_iter = 0
+#     delta = np.inf
+#     while np.abs(delta) > 1 and num_iter < 50:
+#         num_iter += 1
+#         old_loglikelihood = loglikelihood
+#         alpha, beta, gamma, epsilon = EStep(seq, transition, emission, weights)
+#         transition, emission, weights = MStep(seq, gamma, epsilon, states)
+#         loglikelihood = logsumexp(alpha[:, -1])
+#         delta = loglikelihood - old_loglikelihood
+#         print(delta)
 
-    # Normalize. This is probably wrong but i'm doing it anyways...
-    gamma = gamma - logsumexp(gamma, axis = 0)
-    epsilon = epsilon - logsumexp(epsilon, axis = 1) + gamma[:, :-1]
-    return alpha_matrix, beta_matrix, gamma, epsilon
+#     return loglikelihood
 
-def MStep(seq: list[float], gamma: np.ndarray, epsilon: np.ndarray, states: list[str]) -> tuple[dict[str, dict[str, int]], dict[str, list[int]]]:
-    """
-    M-Step of Baum-Welch algorithm.
-    """
-    transition = UpdateTransition(gamma, epsilon, states)
-    emission = UpdateEmission(seq, gamma, states)
-    weights = UpdateWeights(gamma)
-    return transition, emission, weights
 
-def UpdateWeights(gamma):
-    weights = logsumexp(gamma, axis = 1)
-    weights -= logsumexp(weights)
-    return weights
 
-def UpdateTransition(gamma: np.ndarray, epsilon: np.ndarray, states: list[str]):
-    """
-    Updates the transition probability matrix.
-    Input:
-        gamma: Log(S(i)). A n x len(sequence) matrix. Where n is the number of states
-        epsilon: log(S(i, j)). A n x n x len(sequence) matrix. Where n is the number of states.
-        states: a list of possible states. Should be sorted.
-    """
-    transition = {}
-    for i, s1 in enumerate(states):
-        transition[s1] = {}
-        for j, s2 in enumerate(states):
-            transition[s1][s2] = logsumexp(epsilon[i, j, :])
-            transition[s1][s2] -= logsumexp(gamma[i])
-    return transition
+# def EStep(
+#     seq: list[float],
+#     transition_matrix: dict[str, dict[str, int]],
+#     emission_matrix: dict[str, list[int]],
+#     p_state: dict[str, int],
+# ):
+#     """
+#     E-Step of Baum-Welch algorithm.
+#     """
+#     alpha_matrix = Forward(seq, transition_matrix, emission_matrix, p_state)
+#     beta_matrix = Backward(seq, transition_matrix, emission_matrix)
+#     gamma = CalculateProbabiiltyMatrix(alpha_matrix, beta_matrix)
+#     epsilon = CalculateJointProbability(seq, alpha_matrix, beta_matrix, transition_matrix, emission_matrix)
 
-def UpdateEmission(seq: list[float], gamma: np.ndarray, states: list[str]):
-    """
-    Updates the emission probability matrix.
-    seq: Sequence of observations.
-    gamma: (S(i)). A n x len(sequence) matrix. Where n is the number of states.
-    states: a list of possible states. Should be sorted.
-    """
-    gamma = np.exp(gamma)
-    emission = {}
-    for i, s1 in enumerate(states):
-        new_mean = np.sum(seq * gamma[i, :])
-        new_mean /= np.sum(gamma[i, :])    
+#     # Normalize. This is probably wrong but i'm doing it anyways...
+#     gamma = gamma - logsumexp(gamma, axis = 0)
+#     epsilon = epsilon - logsumexp(epsilon, axis = 1) + gamma[:, :-1]
+#     return alpha_matrix, beta_matrix, gamma, epsilon
 
-        mean_center = seq-new_mean
-        new_cov = np.sum(mean_center * mean_center * gamma[i, :])
-        new_cov /= np.sum(gamma[i,:])
+# def MStep(seq: list[float], gamma: np.ndarray, epsilon: np.ndarray, states: list[str]) -> tuple[dict[str, dict[str, int]], dict[str, list[int]]]:
+#     """
+#     M-Step of Baum-Welch algorithm.
+#     """
+#     transition = UpdateTransition(gamma, epsilon, states)
+#     emission = UpdateEmission(seq, gamma, states)
+#     weights = UpdateWeights(gamma)
+#     return transition, emission, weights
 
-        emission[s1] = [new_mean, new_cov]
-    return emission
+# def UpdateWeights(gamma):
+#     weights = logsumexp(gamma, axis = 1)
+#     weights -= logsumexp(weights)
+#     return weights
 
-def CalculateJointProbability(
-    seq: list[float],
-    alpha_matrix: np.ndarray[float],
-    beta_matrix: np.ndarray[float],
-    transition_matrix: dict[str, dict[str, float]],
-    emission_matrix: dict[str, list[float]],
-    # t: int,
-    # state_t: int,
-    # state_t1: int,
-):
-    states = sorted(list(transition_matrix.keys()))
-    state_to_idx = {}
-    for i, key in enumerate(states):
-        state_to_idx[key] = i
-    seq_length = alpha_matrix.shape[1]
+# def UpdateTransition(gamma: np.ndarray, epsilon: np.ndarray, states: list[str]):
+#     """
+#     Updates the transition probability matrix.
+#     Input:
+#         gamma: Log(S(i)). A n x len(sequence) matrix. Where n is the number of states
+#         epsilon: log(S(i, j)). A n x n x len(sequence) matrix. Where n is the number of states.
+#         states: a list of possible states. Should be sorted.
+#     """
+#     transition = {}
+#     for i, s1 in enumerate(states):
+#         transition[s1] = {}
+#         for j, s2 in enumerate(states):
+#             transition[s1][s2] = logsumexp(epsilon[i, j, :])
+#             transition[s1][s2] -= logsumexp(gamma[i])
+#     return transition
 
-    # Set up probability matrix
-    prob_matrix = np.zeros((len(states), len(states), seq_length-1))
-    for i, s in enumerate(states):
-        prob_matrix[i, :, :] = alpha_matrix[:, :-1] + beta_matrix[state_to_idx[s], 1:]
+# def UpdateEmission(seq: list[float], gamma: np.ndarray, states: list[str]):
+#     """
+#     Updates the emission probability matrix.
+#     seq: Sequence of observations.
+#     gamma: (S(i)). A n x len(sequence) matrix. Where n is the number of states.
+#     states: a list of possible states. Should be sorted.
+#     """
+#     gamma = np.exp(gamma)
+#     emission = {}
+#     for i, s1 in enumerate(states):
+#         new_mean = np.sum(seq * gamma[i, :])
+#         new_mean /= np.sum(gamma[i, :])    
+
+#         mean_center = seq-new_mean
+#         new_cov = np.sum(mean_center * mean_center * gamma[i, :])
+#         new_cov /= np.sum(gamma[i,:])
+
+#         emission[s1] = [new_mean, new_cov]
+#     return emission
+
+# def CalculateJointProbability(
+#     seq: list[float],
+#     alpha_matrix: np.ndarray[float],
+#     beta_matrix: np.ndarray[float],
+#     transition_matrix: dict[str, dict[str, float]],
+#     emission_matrix: dict[str, list[float]],
+#     # t: int,
+#     # state_t: int,
+#     # state_t1: int,
+# ):
+#     states = sorted(list(transition_matrix.keys()))
+#     state_to_idx = {}
+#     for i, key in enumerate(states):
+#         state_to_idx[key] = i
+#     seq_length = alpha_matrix.shape[1]
+
+#     # Set up probability matrix
+#     prob_matrix = np.zeros((len(states), len(states), seq_length-1))
+#     for i, s in enumerate(states):
+#         prob_matrix[i, :, :] = alpha_matrix[:, :-1] + beta_matrix[state_to_idx[s], 1:]
     
-    # Add log emission prob
-    for i, s in enumerate(states):
-        mu, sigma = emission_matrix[s]
-        for j, obs in enumerate(seq[1:]):
-            emit = LogNormal(obs, mu, sigma)
-            prob_matrix[:, i, j] += emit
+#     # Add log emission prob
+#     for i, s in enumerate(states):
+#         mu, sigma = emission_matrix[s]
+#         for j, obs in enumerate(seq[1:]):
+#             emit = LogNormal(obs, mu, sigma)
+#             prob_matrix[:, i, j] += emit
     
-    # Add log transition prob
-    for i, s1 in enumerate(states):
-        for j, s2 in enumerate(states):
-            prob_matrix[i, j, :] += transition_matrix[s1][s2]
+#     # Add log transition prob
+#     for i, s1 in enumerate(states):
+#         for j, s2 in enumerate(states):
+#             prob_matrix[i, j, :] += transition_matrix[s1][s2]
 
-    prob_matrix -= logsumexp(prob_matrix)
-    return prob_matrix
-
-
-def Forward(
-    seq: list[int],
-    transition_matrix: dict[str, dict[str, int]],
-    emission_matrix: dict[str, list[int]],
-    p_state: dict[str, int],
-):
-    """
-    Calculates the forwards probability in Baum-Welch algorithm.
-    Input:
-        seq: The sequence of observations.
-        transition_matrix: The current transition probabilities.
-        emissione_matrix: The current emission probabilities.
-        p_state: The probability of a state.
-    Output:
-        The log forward matrix in Baum-Welch algorithm.
-    """
-    states = sorted(list(transition_matrix.keys()))
-    state_to_idx = {}
-    for i, key in enumerate(states):
-        state_to_idx[key] = i
-
-    alpha_matrix = np.zeros((len(states), len(seq)))
-
-    for i, state in enumerate(states):
-        mu, sigma = emission_matrix[state]
-        emit = LogNormal(seq[0], mu, sigma)
-        alpha_matrix[i, 0] = emit + p_state[state_to_idx[state]]
-
-    for t in range(1, len(seq)):
-        obs = seq[t]
-        for i, state in enumerate(states):
-            alpha_matrix_cell = [
-                0 for _ in range(len(states))
-            ]  # List to hold all the log probabilities so we can do logsumexp
-            for j, prev_state in enumerate(states):
-                alpha_matrix_cell[j] = transition_matrix[prev_state][state] + alpha_matrix[j, t - 1]
-
-            mu, sigma = emission_matrix[state]
-            emit = LogNormal(obs, mu, sigma)
-            alpha_matrix[i, t] = logsumexp(alpha_matrix_cell) + emit
-
-    return alpha_matrix
+#     prob_matrix -= logsumexp(prob_matrix)
+#     return prob_matrix
 
 
-def Backward(seq: list[int], transition_matrix: dict[str, dict[str, int]], emission_matrix: dict[str, list[int]]):
-    """
-    Calculates the backwards probability in Baum-Welch algorithm.
-    Input:
-        seq: The sequence of observations.
-        transition_matrix: The current transition probabilities.
-        emissione_matrix: The current emission probabilities.
-    Output:
-        The log backward matrix in Baum-Welch algorithm.
-    """
-    states = sorted(list(transition_matrix.keys()))
-    state_to_idx = {}
-    for i, key in enumerate(states):
-        state_to_idx[key] = i
+# def Forward(
+#     seq: list[int],
+#     transition_matrix: dict[str, dict[str, int]],
+#     emission_matrix: dict[str, list[int]],
+#     p_state: dict[str, int],
+# ):
+#     """
+#     Calculates the forwards probability in Baum-Welch algorithm.
+#     Input:
+#         seq: The sequence of observations.
+#         transition_matrix: The current transition probabilities.
+#         emissione_matrix: The current emission probabilities.
+#         p_state: The probability of a state.
+#     Output:
+#         The log forward matrix in Baum-Welch algorithm.
+#     """
+#     states = sorted(list(transition_matrix.keys()))
+#     state_to_idx = {}
+#     for i, key in enumerate(states):
+#         state_to_idx[key] = i
 
-    beta_matrix = np.zeros((len(states), len(seq)))
+#     alpha_matrix = np.zeros((len(states), len(seq)))
 
-    for i, state in enumerate(states):
-        beta_matrix[i, len(seq) - 1] = 0
+#     for i, state in enumerate(states):
+#         mu, sigma = emission_matrix[state]
+#         emit = LogNormal(seq[0], mu, sigma)
+#         alpha_matrix[i, 0] = emit + p_state[state_to_idx[state]]
 
-    for t in range(len(seq) - 2, -1, -1):
-        obs = seq[t + 1]
-        for i, state in enumerate(states):
-            beta_matrix_cell = [0 for _ in range(len(states))]
-            for j, next_state in enumerate(states):
-                mu = emission_matrix[next_state][0]
-                sigma = emission_matrix[next_state][1]
-                emit = LogNormal(obs, mu, sigma)
-                beta_matrix_cell[j] = transition_matrix[state][next_state] + emit + beta_matrix[j, t + 1]
-                # beta_matrix[i, t] += (
-                #     transition_matrix[state][next_state] * emission_matrix[next_state][obs] * beta_matrix[j, t + 1]
-                # )
-            beta_matrix[i, t] = logsumexp(beta_matrix_cell)
+#     for t in range(1, len(seq)):
+#         obs = seq[t]
+#         for i, state in enumerate(states):
+#             alpha_matrix_cell = [
+#                 0 for _ in range(len(states))
+#             ]  # List to hold all the log probabilities so we can do logsumexp
+#             for j, prev_state in enumerate(states):
+#                 alpha_matrix_cell[j] = transition_matrix[prev_state][state] + alpha_matrix[j, t - 1]
 
-    return beta_matrix
+#             mu, sigma = emission_matrix[state]
+#             emit = LogNormal(obs, mu, sigma)
+#             alpha_matrix[i, t] = logsumexp(alpha_matrix_cell) + emit
+
+#     return alpha_matrix
 
 
-def CalculateProbabiiltyMatrix(alpha_matrix, beta_matrix):
-    """
-    Calculates gamma_i(t) which is the probability of being in state t at time i given the parameters theta and the
-    observed sequence.
-    """
-    prob_matrix = alpha_matrix + beta_matrix
-    prob_matrix -= np.apply_along_axis(logsumexp, axis = 0, arr = prob_matrix)[np.newaxis, :]
-    # prob_matrix = prob_matrix / np.sum(prob_matrix, axis=0)
-    return prob_matrix
+# def Backward(seq: list[int], transition_matrix: dict[str, dict[str, int]], emission_matrix: dict[str, list[int]]):
+#     """
+#     Calculates the backwards probability in Baum-Welch algorithm.
+#     Input:
+#         seq: The sequence of observations.
+#         transition_matrix: The current transition probabilities.
+#         emissione_matrix: The current emission probabilities.
+#     Output:
+#         The log backward matrix in Baum-Welch algorithm.
+#     """
+#     states = sorted(list(transition_matrix.keys()))
+#     state_to_idx = {}
+#     for i, key in enumerate(states):
+#         state_to_idx[key] = i
+
+#     beta_matrix = np.zeros((len(states), len(seq)))
+
+#     for i, state in enumerate(states):
+#         beta_matrix[i, len(seq) - 1] = 0
+
+#     for t in range(len(seq) - 2, -1, -1):
+#         obs = seq[t + 1]
+#         for i, state in enumerate(states):
+#             beta_matrix_cell = [0 for _ in range(len(states))]
+#             for j, next_state in enumerate(states):
+#                 mu = emission_matrix[next_state][0]
+#                 sigma = emission_matrix[next_state][1]
+#                 emit = LogNormal(obs, mu, sigma)
+#                 beta_matrix_cell[j] = transition_matrix[state][next_state] + emit + beta_matrix[j, t + 1]
+#                 # beta_matrix[i, t] += (
+#                 #     transition_matrix[state][next_state] * emission_matrix[next_state][obs] * beta_matrix[j, t + 1]
+#                 # )
+#             beta_matrix[i, t] = logsumexp(beta_matrix_cell)
+
+#     return beta_matrix
+
+
+# def CalculateProbabiiltyMatrix(alpha_matrix, beta_matrix):
+#     """
+#     Calculates gamma_i(t) which is the probability of being in state t at time i given the parameters theta and the
+#     observed sequence.
+#     """
+#     prob_matrix = alpha_matrix + beta_matrix
+#     prob_matrix -= np.apply_along_axis(logsumexp, axis = 0, arr = prob_matrix)[np.newaxis, :]
+#     # prob_matrix = prob_matrix / np.sum(prob_matrix, axis=0)
+#     return prob_matrix
