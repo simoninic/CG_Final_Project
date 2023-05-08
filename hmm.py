@@ -32,6 +32,7 @@ def ViterbiTraining(
         for i, seq in enumerate(sequences):
             state_path = ViterbiDecoding(seq, state_vals, transition_mm, emission_mm, init_mm)
             new_paths[i] = state_path
+        
         emission_mm = UpdateEmission(sequences, new_paths, state_vals, emission_mm)
         transition_mm = UpdateTransition(new_paths, state_vals)
 
@@ -55,9 +56,12 @@ def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: lis
 
     for seq, path in zip(sequences, state_paths):
         for char, state in zip(seq, path):
-            new_emission[state][0] += char
-            state_counts[state] += 1
-    
+            try:
+                new_emission[state][0] += char
+                state_counts[state] += 1
+            except:
+                print(len(seq), len(path))
+                raise Exception('AH')
     for state in state_vals:
         if state_counts[state] != 0:
             new_emission[state][0] /= state_counts[state]
@@ -71,7 +75,6 @@ def UpdateEmission(sequences: list[str], state_paths: list[str], state_vals: lis
         if state_counts[state] != 0:
             new_emission[state][1] /= state_counts[state]
     
-    print(new_emission)
     return new_emission
 
 def UpdateTransition(state_paths: list[str], state_vals: list[str]):
@@ -124,7 +127,7 @@ def ViterbiDecoding(
         Sequence of states.
     """
     score_matrix = np.zeros([len(state_vals), len(seq)])
-    path_matrix = np.zeros(score_matrix.shape) - 1  # Initialize a matrix of -1. 0 = vampire, 1 = werewolf
+    path_matrix = np.zeros(score_matrix.shape) - 1  # Initialize a matrix of -1.
     for row, state in enumerate(state_vals):
         mu, sigma = emission_mm[state]
         log_prob_emit = LogNormal(seq[0], mu, sigma)
@@ -163,9 +166,10 @@ def Backtrack(path_matrix: np.ndarray, state_vals: list[str], start_idx: int) ->
         the path as a string.
     """
     current_idx = start_idx
-    path = ""
+    path = [0 for _ in range(path_matrix.shape[1])]
     for i in range(path_matrix.shape[1] - 1, -1, -1):
-        path = "".join([state_vals[current_idx], path])
+        # path = "".join([state_vals[current_idx], path])
+        path[i] = state_vals[current_idx]
         current_idx = int(path_matrix[current_idx, i])
     return path
 
